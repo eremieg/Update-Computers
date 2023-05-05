@@ -81,6 +81,7 @@ $computers | ForEach-Object -Parallel -ThrottleLimit 4 {
         UpdatesInstalled = @()
         Awake            = $false
         UpdateError      = $false
+        LastLoggedOnUser = $null
     }
 
     while (-not $computerAwake -and $retryCount -lt $maxRetries) {
@@ -102,6 +103,20 @@ $computers | ForEach-Object -Parallel -ThrottleLimit 4 {
     }
     
     if ($computerAwake) {
+            $result.Awake = $true
+        }
+        else {
+            $retryCount++
+        }
+        if ($computerAwake) {
+            try {
+                $lastLoggedOnUser = (Get-WmiObject -Class Win32_ComputerSystem -ComputerName $computerName).UserName
+                $result.LastLoggedOnUser = $lastLoggedOnUser
+            }
+            catch {
+                Write-Warning "Failed to retrieve the last logged-on user for $computerName. Error: $_"
+                Write-Log "Failed to retrieve the last logged-on user for $computerName. Error: $_" -Level "WARNING"
+            }
         # If the computer is online, update it using Invoke-WUInstall
         Write-Verbose "$computerName is online. Updating..."
         
@@ -141,18 +156,18 @@ $computers | ForEach-Object -Parallel -ThrottleLimit 4 {
 Write-Verbose "Generating HTML output..."
 
 # Updated computers table
-$updatedComputersTable = $updatedComputers.GetEnumerator() | 
-Select-Object @{Name = 'Computer Name'; Expression = { $_.Key } }, @{Name = 'Updates Installed'; Expression = { ($_.Value | ForEach-Object { $_.Title }) -join ", " } } |
+$updatedComputersTable = $results | Where-Object { $_.Awake -and -not $_.UpdateError } | 
+Select-Object @{Name = 'Computer Name'; Expression = { $_.ComputerName } }, @{Name = 'Last Logged-on User'; Expression = { $_.LastLoggedOnUser } }, @{Name = 'Updates Installed'; Expression = { ($_.UpdatesInstalled | ForEach-Object { $_.Title }) -join ", " } } |
 ConvertTo-Html -Fragment
 
 # Not awakened computers table
-$notAwakenedComputersTable = $notAwakenedComputers | 
-Select-Object @{Name = 'Computer Name'; Expression = { $_ } } | 
+$notAwakenedComputersTable = $results | Where-Object { -not $_.Awake } | 
+Select-Object @{Name = 'Computer Name'; Expression = { $_.ComputerName } }, @{Name = 'Last Logged-on User'; Expression = { $_.LastLoggedOnUser } } | 
 ConvertTo-Html -Fragment
 
 # Update error computers table
-$updateErrorComputersTable = $updateErrorComputers | 
-Select-Object @{Name = 'Computer Name'; Expression = { $_ } } | 
+$updateErrorComputersTable = $results | Where-Object { $_.Awake -and $_.UpdateError } | 
+Select-Object @{Name = 'Computer Name'; Expression = { $_.ComputerName } }, @{Name = 'Last Logged-on User'; Expression = { $_.LastLoggedOnUser } }, @{Name = 'Updates Installed'; Expression = { ($_.UpdatesInstalled | ForEach-Object { $_.Title }) -join ", " } } | 
 ConvertTo-Html -Fragment
 
 # Generate the complete HTML content
