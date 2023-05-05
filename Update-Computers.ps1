@@ -11,7 +11,7 @@ catch {
 }
 
 try {
-    Import-Module PSWindowsUpdate -ErrorAction Stop
+    Import-Module PSWindowsUpdate -ErrorAction Stop -UseSSL
 }
 catch {
     Write-Error "Failed to import PSWindowsUpdate module. Please ensure the module is installed."
@@ -49,13 +49,15 @@ catch {
     exit 1
 }
 
-if (-not ($computers[0].PSObject.Properties.Name -contains 'ComputerName')) {
+if (-not (($computers | Get-Member -MemberType NoteProperty).Name -contains 'ComputerName')) {
     Write-Error "The CSV file is missing the 'ComputerName' column."
     exit 1
 }
 
 # Initialize result arrays
-$results = @()
+$notAwakenedComputers = @()
+$updatedComputers = @()
+$updateErrorComputers = @()
 
 # Create a log file
 $logFile = "UpdateComputers.log"
@@ -69,10 +71,23 @@ function Write-Log([string]$Message, [string]$Level = "INFO") {
     Add-Content -Path $logFile -Value "[$timestamp] [$Level] $Message"
 }
 
+# Get MAC address from Active Directory
+function Get-MACAddressFromAD($computerName) {
+    try {
+        $computer = Get-ADComputer $computerName -Properties *
+        $macAddress = $computer.'msDS-PhyShardwareId'
+        return $macAddress
+    }
+    catch {
+        Write-Warning "Failed to retrieve MAC address for $computerName from Active Directory. Error: $_"
+        return $null
+    }
+}
+
 # Iterate through each computer in the CSV file
 $computers | ForEach-Object -Parallel -ThrottleLimit 4 {
-    $computerName = $_.Name
-    $macAddress = $_.MACAddress
+    $computerName = $_.ComputerName
+    $macAddress = Get-MACAddressFromAD $computerName
     $retryCount = 0
     $maxRetries = 4
     $computerAwake = $false
@@ -85,10 +100,17 @@ $computers | ForEach-Object -Parallel -ThrottleLimit 4 {
 
     while (-not $computerAwake -and $retryCount -lt $maxRetries) {
         # Wake up the computer using its MAC address
-        Write-Verbose "Attempting to wake up $computerName (attempt $(($retryCount + 1)))..."
-        Write-Log "Attempting to wake up $computerName (attempt $(($retryCount + 1)))..."
-        Send-WOL -MACAddress $macAddress
-        Start-Sleep -Seconds 60
+        if ($macAddress) {
+            Write-Verbose "Attempting to wake up $computerName (attempt $(($retryCount + 1)))..."
+            Write-Log "Attempting to wake up $computerName (attempt $(($retryCount + 1)))..."
+            Send-WOL -MACAddress $macAddress
+            Start-Sleep -Seconds 60
+        }
+        else {
+            Write-Warning "Skipping $computerName due to missing MAC address."
+            Write-Log "Skipping $computerName due to missing MAC address." -Level "WARNING"
+            break
+        }
 
         # Check if the computer is online using Test-Connection
         Write-Verbose "Checking if $computerName is online..."
@@ -116,6 +138,7 @@ $computers | ForEach-Object -Parallel -ThrottleLimit 4 {
                 # Add the computer and its installed updates to the result object
                 $result.UpdatesInstalled = $updates
                 $updateSuccess = $true
+                $updatedComputers += $computerName
             }
             catch {
                 Write-Warning "Failed to update $computerName (attempt $(($updateAttempt + 1))). Error: $_"
@@ -127,13 +150,13 @@ $computers | ForEach-Object -Parallel -ThrottleLimit 4 {
         }
     }
 
-    # Add the result object to the results array
-    $results += $result
-    else {
-        # If the computer is not online, add it to the notAwakenedComputers array
+    if (-not $computerAwake) {
         Write-Verbose "$computerName did not wake up after $maxRetries attempts."
         Write-Log "$computerName did not wake up after $maxRetries attempts." -Level "WARNING"
         $notAwakenedComputers += $computerName
+    }
+    elseif ($result.UpdateError) {
+        $updateErrorComputers += $computerName
     }
 }
 
@@ -141,18 +164,18 @@ $computers | ForEach-Object -Parallel -ThrottleLimit 4 {
 Write-Verbose "Generating HTML output..."
 
 # Updated computers table
-$updatedComputersTable = $updatedComputers.GetEnumerator() | 
-Select-Object @{Name = 'Computer Name'; Expression = { $_.Key } }, @{Name = 'Updates Installed'; Expression = { ($_.Value | ForEach-Object { $_.Title }) -join ", " } } |
+$updatedComputersTable = $updatedComputers | 
+Select-Object @{Name = 'Computer Name'; Expression = { $_ }} |
 ConvertTo-Html -Fragment
 
 # Not awakened computers table
 $notAwakenedComputersTable = $notAwakenedComputers | 
-Select-Object @{Name = 'Computer Name'; Expression = { $_ } } | 
+Select-Object @{Name = 'Computer Name'; Expression = { $_ }} | 
 ConvertTo-Html -Fragment
 
 # Update error computers table
 $updateErrorComputersTable = $updateErrorComputers | 
-Select-Object @{Name = 'Computer Name'; Expression = { $_ } } | 
+Select-Object @{Name = 'Computer Name'; Expression = { $_ }} | 
 ConvertTo-Html -Fragment
 
 # Generate the complete HTML content
