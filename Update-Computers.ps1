@@ -84,8 +84,11 @@ function Get-MACAddressFromAD($computerName) {
     }
 }
 
+$progressCount = 0
+$totalComputers = $computers.Count
+
 # Iterate through each computer in the CSV file
-$computers | ForEach-Object -Parallel -ThrottleLimit 4 {
+$computers | ForEach-Object {
     $computerName = $_.ComputerName
     $macAddress = Get-MACAddressFromAD $computerName
     $retryCount = 0
@@ -123,22 +126,17 @@ $computers | ForEach-Object -Parallel -ThrottleLimit 4 {
             $retryCount++
         }
     }
-    
+
     if ($computerAwake) {
-            $result.Awake = $true
+        try {
+            $lastLoggedOnUser = (Get-WmiObject -Class Win32_ComputerSystem -ComputerName $computerName).UserName
+            $result.LastLoggedOnUser = $lastLoggedOnUser
         }
-        else {
-            $retryCount++
+        catch {
+            Write-Warning "Failed to retrieve the last logged-on user for $computerName. Error: $_"
+            Write-Log "Failed to retrieve the last logged-on user for $computerName. Error: $_" -Level "WARNING"
         }
-        if ($computerAwake) {
-            try {
-                $lastLoggedOnUser = (Get-WmiObject -Class Win32_ComputerSystem -ComputerName $computerName).UserName
-                $result.LastLoggedOnUser = $lastLoggedOnUser
-            }
-            catch {
-                Write-Warning "Failed to retrieve the last logged-on user for $computerName. Error: $_"
-                Write-Log "Failed to retrieve the last logged-on user for $computerName. Error: $_" -Level "WARNING"
-            }
+
         # If the computer is online, update it using Invoke-WUInstall
         Write-Verbose "$computerName is online. Updating..."
         
@@ -173,13 +171,23 @@ $computers | ForEach-Object -Parallel -ThrottleLimit 4 {
     elseif ($result.UpdateError) {
         $updateErrorComputers += $computerName
     }
+
+    $progressCount++
+    Write-Progress -Activity "Processing Computers" -Status "$computerName ($progressCount/$($computers.Count))" -PercentComplete ($progressCount / $computers.Count * 100)
+
+    return $result
 }
+
+# Collect results from the parallel processing
+$results = $computers | ForEach-Object -Parallel {
+    $result = Process-Computer -Computer $_
+    return $result
+} -ThrottleLimit 4
 
 # Generate HTML output
 Write-Verbose "Generating HTML output..."
 
 # Updated computers table
-
 $updatedComputersTable = $results |
 Where-Object { $_.Awake -and -not $_.UpdateError } |
 Select-Object @{Name = 'Computer Name'; Expression = { $_.ComputerName } }, @{Name = 'Updates Installed'; Expression = { ($_.UpdatesInstalled | ForEach-Object { $_.Title }) -join ", " } } |
