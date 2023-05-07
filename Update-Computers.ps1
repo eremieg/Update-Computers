@@ -18,22 +18,6 @@ catch {
     exit 1
 }
 
-# Wake on LAN function
-function Send-WOL {
-    param(
-        [parameter(Mandatory = $true)][string]$MACAddress
-    )
-
-    $broadcast = [Net.IPAddress]::Broadcast
-    $mac = $MACAddress -replace "[:-]", ""
-    $packet = ([Byte[]](, 0xFF * 6)) + (([Byte[]](, [Convert]::ToByte($mac.Substring(0, 2), 16)) * 16) * 6)
-
-    $udpClient = New-Object Net.Sockets.UdpClient
-    $udpClient.Connect($broadcast, 7)
-    $udpClient.Send($packet, 102)
-    $udpClient.Close()
-}
-
 # Prompt user for the CSV file path
 $csvPath = Read-Host -Prompt 'Please provide the path to the CSV file'
 if (-not (Test-Path $csvPath)) {
@@ -54,6 +38,40 @@ if (-not (($computers | Get-Member -MemberType NoteProperty).Name -contains 'Com
     exit 1
 }
 
+# Get MAC address from Active Directory
+function Get-MACAddressFromAD($computerName) {
+    try {
+        $computer = Get-ADComputer $computerName -Properties 'msDS-PhyShardwareId'
+        $macAddress = $computer.'msDS-PhyShardwareId'
+        return $macAddress
+    }
+    catch {
+        Write-Log "Failed to retrieve MAC address for $computerName from Active Directory. Error: $_" -Level "WARNING"
+        return $null
+    }
+}
+
+# Wake on LAN function
+function Send-WOL {
+    param(
+        [parameter(Mandatory = $true)][string]$MACAddress
+    )
+
+    try {
+        $broadcast = [Net.IPAddress]::Broadcast
+        $mac = $MACAddress -replace "[:-]", ""
+        $packet = ([Byte[]](, 0xFF * 6)) + (([Byte[]](, [Convert]::ToByte($mac.Substring(0, 2), 16)) * 16) * 6)
+
+        $udpClient = New-Object Net.Sockets.UdpClient
+        $udpClient.Connect($broadcast, 7)
+        $udpClient.Send($packet, 102)
+        $udpClient.Close()
+    }
+    catch {
+        Write-Log "Failed to send Wake-on-LAN packet for MAC address $MACAddress. Error: $_" -Level "WARNING"
+    }
+}
+
 # Initialize result arrays
 $notAwakenedComputers = @()
 $updatedComputers = @()
@@ -71,21 +89,7 @@ function Write-Log([string]$Message, [string]$Level = "INFO") {
     Add-Content -Path $logFile -Value "[$timestamp] [$Level] $Message"
 }
 
-# Get MAC address from Active Directory
-function Get-MACAddressFromAD($computerName) {
-    try {
-        $computer = Get-ADComputer $computerName -Properties *
-        $macAddress = $computer.'msDS-PhyShardwareId'
-        return $macAddress
-    }
-    catch {
-        Write-Warning "Failed to retrieve MAC address for $computerName from Active Directory. Error: $_"
-        return $null
-    }
-}
-
 $progressCount = 0
-$totalComputers = $computers.Count
 
 # Iterate through each computer in the CSV file
 $computers | ForEach-Object {
@@ -94,7 +98,7 @@ $computers | ForEach-Object {
     $retryCount = 0
     $maxRetries = 4
     $computerAwake = $false
-    $result = New-Object -TypeName PSObject -Property @{
+    $result = [PSCustomObject]@{
         ComputerName     = $computerName
         UpdatesInstalled = @()
         Awake            = $false
